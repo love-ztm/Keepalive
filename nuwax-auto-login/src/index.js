@@ -96,7 +96,7 @@ async function main() {
 
   // TG 通知
   if (loginSuccess) {
-    const msg = needLogin ? '已重新登录并续期 Cookie' : 'Cookie 仍有效，跳过登录';
+    const msg = needLogin ? '已重新登录并续期 Cookie' : 'Cookie 有效，跳过登录';
     await sendNotify({
       status: 'success',
       message: msg,
