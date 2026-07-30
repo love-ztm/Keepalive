@@ -9,9 +9,9 @@
  * 5. 登录成功 → 将 Cookie 写入 GitHub Variable
  * 6. TG 通知结果（含积分数据）
  */
-import { readCookieFromEnv, validateCookie, saveCookieToVariable } from './cookie.js';
+import { readCookieFromEnv, saveCookieToVariable } from './cookie.js';
 import { doLogin } from './login.js';
-import { fetchCredits, fetchCreditsWithCookieViaBrowser } from './credits.js';
+import { fetchCredits, fetchCreditsWithCookieViaBrowser, checkSessionAndFetchCredits } from './credits.js';
 import { sendNotify } from './notify.js';
 
 async function main() {
@@ -36,14 +36,17 @@ async function main() {
 
   let needLogin = true;
   let cookieStr = savedCookie;
+  let credit = null;
 
-  // 步骤 2: 如果有 Cookie，校验有效性
+  // 步骤 2: 如果有 Cookie，用浏览器实地校验并顺带取回积分
+  // （SPA 的 HTML 外壳无法用 fetch 判断登录态，必须看 /home 是否被弹回 /login）
   if (savedCookie) {
     console.log('[main] 检测到已保存的 Cookie，正在校验...');
-    const valid = await validateCookie(savedCookie);
-    if (valid) {
+    const session = await checkSessionAndFetchCredits(savedCookie);
+    if (session.valid) {
       console.log('[main] Cookie 有效，跳过登录');
       needLogin = false;
+      credit = session.credit;
     } else {
       console.log('[main] Cookie 已过期，需要重新登录');
     }
@@ -52,7 +55,8 @@ async function main() {
   }
 
   let loginSuccess = false;
-  let credit = null;
+  // null 表示本次没走写回（Cookie 仍有效），非 null 时为 { ok, error }
+  let cookieSaved = null;
 
   if (needLogin) {
     console.log('[main] 开始执行自动化登录...');
@@ -63,10 +67,9 @@ async function main() {
       cookieStr = result.cookies;
       loginSuccess = true;
 
-      // 查询积分（用浏览器上下文直接访问）
+      // 查询积分（复用登录后的浏览器上下文）
       if (result.context) {
         credit = await fetchCredits(result.context);
-        // 关闭浏览器
         try {
           const browser = result.context.browser();
           if (browser) await browser.close();
@@ -77,20 +80,18 @@ async function main() {
       }
 
       // 保存 Cookie 到 GitHub Variable
-      await saveCookieToVariable(cookieStr);
+      cookieSaved = await saveCookieToVariable(cookieStr);
     } else {
       console.error('[main] 登录失败');
       await sendNotify({
         status: 'fail',
-        message: '自动登录失败，滑块验证未通过或页面异常',
+        message: result.reason || '自动登录失败，滑块验证未通过或页面异常',
         screenshotUrl: result.screenshotPath,
       });
       process.exit(1);
     }
   } else {
     loginSuccess = true;
-    // Cookie 有效，用浏览器查积分（确保 JS 渲染后的数据）
-    credit = await fetchCreditsWithCookieViaBrowser(cookieStr);
   }
 
   // TG 通知
@@ -100,6 +101,7 @@ async function main() {
       status: 'success',
       message: msg,
       credit,
+      cookieSaved,
     });
   }
 

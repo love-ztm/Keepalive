@@ -3,6 +3,7 @@
  * 启动浏览器 → 拦截行为数据上报 → 填写表单 → 触发滑块 → 类人拖拽 → 登录成功 → 提取 Cookie
  */
 import { chromium } from 'playwright';
+import { mkdir } from 'fs/promises';
 import { solveSlider } from './captcha.js';
 
 /**
@@ -129,28 +130,92 @@ export async function doLogin({ phone, password, debug = false }) {
       } catch (e) {
         console.log('[login] 手动点击失败:', e.message);
       }
+
+      // 手动点击后再次确认是否离开登录页
+      for (let i = 0; i < 5; i++) {
+        if (!page.url().includes('/login')) {
+          console.log(`[login] 页面已跳转到: ${page.url()}`);
+          redirectHappened = true;
+          break;
+        }
+        await page.waitForTimeout(1000);
+      }
+    }
+
+    // 关键校验：仍停留在登录页说明登录未成功，不能当作成功返回
+    if (!redirectHappened) {
+      const reason = await readLoginError(page);
+      console.error(`[login] 登录失败：页面仍停留在 ${page.url()}${reason ? `（${reason}）` : ''}`);
+      screenshotPath = await captureFailure(page, 'not-logged-in');
+      await browser.close();
+      return { success: false, cookies: null, screenshotPath, context: null, reason: reason || '登录后未跳转，仍停留在登录页' };
     }
 
     // 提取 Cookie
     const cookies = await context.cookies();
-    const cookieStr = JSON.stringify(cookies);
+    if (!cookies.length) {
+      console.error('[login] 登录失败：未取到任何 Cookie');
+      screenshotPath = await captureFailure(page, 'no-cookie');
+      await browser.close();
+      return { success: false, cookies: null, screenshotPath, context: null, reason: '登录后未取到 Cookie' };
+    }
 
+    const cookieStr = JSON.stringify(cookies);
     console.log(`[login] 登录成功，提取到 ${cookies.length} 个 Cookie`);
 
     // 不关闭浏览器，让调用者用 context 查积分
     return { success: true, cookies: cookieStr, screenshotPath: null, context };
   } catch (err) {
     console.error('[login] 登录异常:', err.message);
-    if (browser && debug) {
+    if (browser) {
       try {
         const pages = context?.pages();
         if (pages?.length > 0) {
-          screenshotPath = `screenshots/error-${Date.now()}.png`;
-          await pages[0].screenshot({ path: screenshotPath, fullPage: true });
+          screenshotPath = await captureFailure(pages[0], 'error');
         }
       } catch (_) {}
     }
     if (browser) await browser.close();
-    return { success: false, cookies: null, screenshotPath, context: null };
+    return { success: false, cookies: null, screenshotPath, context: null, reason: err.message };
+  }
+}
+
+/**
+ * 读取登录页上的错误提示（Ant Design 表单/全局提示）
+ * @param {import('playwright').Page} page
+ * @returns {Promise<string|null>} 错误文案
+ */
+async function readLoginError(page) {
+  try {
+    return await page.evaluate(() => {
+      const selectors = ['.ant-form-item-explain-error', '.ant-message-error', '.ant-alert-message'];
+      for (const sel of selectors) {
+        const el = document.querySelector(sel);
+        const text = el?.textContent?.trim();
+        if (text) return text;
+      }
+      return null;
+    });
+  } catch (_) {
+    return null;
+  }
+}
+
+/**
+ * 失败时截图，供 workflow 上传为 artifact 排查
+ * @param {import('playwright').Page} page
+ * @param {string} tag - 文件名标签
+ * @returns {Promise<string|null>} 截图路径
+ */
+async function captureFailure(page, tag) {
+  const path = `screenshots/${tag}-${Date.now()}.png`;
+  try {
+    await mkdir('screenshots', { recursive: true });
+    await page.screenshot({ path, fullPage: true });
+    console.log(`[login] 已保存失败截图: ${path}`);
+    return path;
+  } catch (err) {
+    console.warn('[login] 保存截图失败:', err.message);
+    return null;
   }
 }
