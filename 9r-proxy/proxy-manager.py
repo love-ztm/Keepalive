@@ -25,6 +25,7 @@ import json
 import base64
 import logging
 from datetime import datetime, timezone, timedelta
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import requests
 
@@ -35,6 +36,10 @@ COOKIE_FILE = "cookies.txt"          # 登录 cookie 持久化（供 CI 写回�
 OUTPUT_FILE = "socks5-otc.txt"       # 最终可用节点输出
 NODES_FILE = "socks5.txt"            # tg-fetch.py 产物
 TYPE_ALLOWED = {"socks5", "http", "https"}  # 只处理这些类型
+
+# 并行测试配置
+TEST_CONCURRENCY = int(os.getenv("TEST_CONCURRENCY") or "8")  # 并行线程数
+TEST_TIMEOUT = int(os.getenv("TEST_TIMEOUT") or "15")         # 单次测试超时（秒），超时判定为不通
 
 # 解析节点 URL: scheme://user:pass@ip:port
 NODE_RE = re.compile(r"(socks5|http|https)://[^\s#@]+@(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}):(\d+)")
@@ -152,16 +157,15 @@ def api_add_pool(session: requests.Session, name: str, proxy_url: str) -> bool:
         return False
 
 
-def api_test_pool(session: requests.Session, pool_id) -> bool:
-    """测试代理池连通性，返回是否通过（真实响应: {"ok": bool, "error": str}）"""
+def api_test_pool(session: requests.Session, pool_id, timeout: int = TEST_TIMEOUT) -> bool:
+    """测试代理池连通性，返回是否通过（真实响应: {"ok": bool, "error": str}）
+    timeout 为单次请求超时（秒），超过则判定为不通"""
     try:
-        resp = session.post(f"{BASE_URL}/api/proxy-pools/{pool_id}/test", timeout=60)
+        resp = session.post(f"{BASE_URL}/api/proxy-pools/{pool_id}/test", timeout=timeout)
         data = resp.json()
         return bool(data.get("ok"))
-    except requests.RequestException as e:
-        log.error("测试代理池 %s 请求异常: %s", pool_id, e)
-        return False
-    except ValueError:
+    except (requests.RequestException, ValueError) as e:
+        log.warning("测试代理池 %s 异常（判定为不通）: %s", pool_id, e)
         return False
 
 
@@ -263,26 +267,50 @@ def main():
                 stats["fail_added"] += 1
         # 已存在则跳过（只增不减）
 
-    # 5. 获取最新代理池列表（含新增），全局测试连通性
+    # 5. 获取最新代理池列表（含新增），全局并行测试连通性
     pools = api_get_pools(session)
-    live_pools = []
+    candidates = []
     for p in pools:
         ptype = p.get("type", "")
         if not is_type_allowed(ptype):
             continue
         pool_id = p.get("id") or p.get("_id")
-        name = p.get("name") or extract_name(p.get("proxyUrl", ""))
         if not pool_id:
             continue
-        ok = api_test_pool(session, pool_id)
-        if ok:
-            live_pools.append(p)
-        else:
-            log.warning("节点测试不通，删除: %s", name)
-            if api_delete_pool(session, pool_id):
-                stats["deleted"] += 1
+        candidates.append((pool_id, p.get("name") or extract_name(p.get("proxyUrl", "")), p))
+
+    log.info("开始并行测试 %d 个节点（并发 %d，超时 %ds）...",
+             len(candidates), TEST_CONCURRENCY, TEST_TIMEOUT)
+
+    live_pools = []
+    dead_pools = []
+    # 每个线程用独立 Session + 自己的 cookie，避免 requests.Session 线程不安全
+    cookie_list_shared = load_cookie_jar()
+
+    def test_one(args):
+        pool_id, name, p = args
+        s = make_session(cookie_list_shared)
+        ok = api_test_pool(s, pool_id, timeout=TEST_TIMEOUT)
+        return pool_id, name, p, ok
+
+    with ThreadPoolExecutor(max_workers=TEST_CONCURRENCY) as ex:
+        futures = [ex.submit(test_one, c) for c in candidates]
+        for fut in as_completed(futures):
+            pool_id, name, p, ok = fut.result()
+            if ok:
+                live_pools.append(p)
             else:
-                log.error("删除节点 %s 失败", name)
+                dead_pools.append((pool_id, name))
+
+    # 删除测试不通的节点（串行，DELETE 很快）
+    for pool_id, name in dead_pools:
+        log.warning("节点测试不通，删除: %s", name)
+        if api_delete_pool(session, pool_id):
+            stats["deleted"] += 1
+        else:
+            log.error("删除节点 %s 失败", name)
+
+    log.info("测试完成: 存活 %d, 删除 %d", len(live_pools), len(dead_pools))
 
     # 6. 输出最终可用节点到 socks5-otc.txt（覆盖写）
     stats["total"] = len(live_pools)

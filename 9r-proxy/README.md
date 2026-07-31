@@ -22,6 +22,8 @@ tg-fetch.py ──► socks5.txt ──► proxy-manager.py ──► socks5-otc
 | `R9_PASSWORD` | 9router 登录密码 | 是 |
 | `R9_COOKIE` | 9router session cookie（持久化） | 否 |
 | `GH_TOKEN` | 写回仓库 Token | 是（CI 用） |
+| `TEST_CONCURRENCY` | 并行测试并发数，默认 8 | 否 |
+| `TEST_TIMEOUT` | 单节点测试超时秒数，默认 15 | 否 |
 
 ## 本地运行
 
@@ -35,6 +37,10 @@ python tg-fetch.py
 
 # 2. 同步到 9router
 export R9_PASSWORD=xxx
+python proxy-manager.py
+
+# 可选：调整并行测试参数
+export TEST_CONCURRENCY=16 TEST_TIMEOUT=20
 python proxy-manager.py
 ```
 
