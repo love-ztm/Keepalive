@@ -26,7 +26,6 @@ import base64
 import logging
 from datetime import datetime, timezone, timedelta
 from concurrent.futures import ThreadPoolExecutor, as_completed
-
 import requests
 
 BASE_URL = os.getenv("9R_BASE_URL") or "https://9rou.argo.indevs.in"
