@@ -352,7 +352,7 @@ def send_tg_notification(stats: dict):
     bjt = datetime.now(timezone(timedelta(hours=8)))
     date_str = f"{bjt.year}年{bjt.month:02d}月{bjt.day:02d}日"
     message = (
-        f"🎉 <b>OTC 代理同步完成</b>\n"
+        f"🎉 <b>9Router 代理池更新</b>\n"
         f"----------------\n"
         f"📅 <b>日期</b>：{date_str}\n"
         f"📥 <b>TG 抓取</b>：{stats['fetched']} 个节点\n"
