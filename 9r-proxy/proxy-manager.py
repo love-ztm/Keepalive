@@ -49,41 +49,50 @@ log = logging.getLogger("proxy-manager")
 
 # ================= Cookie 管理 =================
 
-def cookie_b64_to_jar(b64: str) -> dict:
-    """从 base64 JSON 还原 requests cookie dict"""
+def cookie_b64_to_jar(b64: str) -> list:
+    """从 base64 JSON 还原 requests cookie 列表（name/value/domain/path）"""
     try:
         raw = base64.b64decode(b64).decode("utf-8")
-        return json.loads(raw)
+        data = json.loads(raw)
+        if isinstance(data, dict):
+            # 兼容旧的扁平 dict 格式 {name: value}
+            return [{"name": k, "value": v, "domain": "", "path": "/"} for k, v in data.items()]
+        return data if isinstance(data, list) else []
     except Exception:
-        return {}
+        return []
 
 
-def cookie_jar_to_b64(cookies: dict) -> str:
-    """将 cookie dict 编码为 base64 JSON（供写回 GitHub Variables）"""
+def cookie_jar_to_b64(cookies: list) -> str:
+    """将 cookie 列表编码为 base64 JSON（供写回 GitHub Variables）"""
     return base64.b64encode(json.dumps(cookies).encode("utf-8")).decode("utf-8")
 
 
-def load_cookie_jar() -> dict:
+def load_cookie_jar() -> list:
     """读取 R9_COOKIE，优先环境变量，其次 cookies.txt"""
     if COOKIE_B64:
         return cookie_b64_to_jar(COOKIE_B64)
     if os.path.exists(COOKIE_FILE):
         with open(COOKIE_FILE, "r", encoding="utf-8") as f:
             return cookie_b64_to_jar(f.read().strip())
-    return {}
+    return []
 
 
-def save_cookie_jar(cookies: dict):
+def save_cookie_jar(cookies: list):
     """写入 cookies.txt（供 CI 写回 R9_COOKIE）"""
     with open(COOKIE_FILE, "w", encoding="utf-8") as f:
         f.write(cookie_jar_to_b64(cookies))
 
 
-def make_session(cookies: dict) -> requests.Session:
+def make_session(cookies: list) -> requests.Session:
     """构建带 cookie 的 requests.Session"""
     s = requests.Session()
-    if cookies:
-        s.cookies.update(cookies)
+    for c in cookies:
+        s.cookies.set(
+            c.get("name"), c.get("value"),
+            domain=c.get("domain") or "",
+            path=c.get("path") or "/",
+            secure=c.get("secure") or False,
+        )
     s.headers.update({"Content-Type": "application/json"})
     return s
 
@@ -91,7 +100,7 @@ def make_session(cookies: dict) -> requests.Session:
 # ================= 9router API =================
 
 def api_login(session: requests.Session) -> bool:
-    """登录 9router，返回是否成功"""
+    """登录 9router，返回是否成功（成功时 session 自动保存 auth_token cookie）"""
     try:
         resp = session.post(f"{BASE_URL}/api/auth/login", json={"password": PASSWORD}, timeout=15)
         data = resp.json()
@@ -106,17 +115,25 @@ def api_login(session: requests.Session) -> bool:
 
 
 def api_get_pools(session: requests.Session) -> list:
-    """获取全部代理池，返回 [{name, proxyUrl, type, id, ...}]"""
-    resp = session.get(f"{BASE_URL}/api/proxy-pools", timeout=15)
-    data = resp.json()
-    if not data.get("success"):
-        log.warning("获取代理池失败: %s", data.get("message", "未知错误"))
+    """获取全部代理池，返回 [{name, proxyUrl, type, id, ...}]（真实响应: {"proxyPools": [...]}）"""
+    try:
+        resp = session.get(f"{BASE_URL}/api/proxy-pools", timeout=15)
+        data = resp.json()
+        pools = data.get("proxyPools") if isinstance(data, dict) else None
+        if isinstance(pools, list):
+            return pools
+        log.warning("获取代理池响应异常: %s", resp.text[:200])
         return []
-    return data.get("data", [])
+    except requests.RequestException as e:
+        log.error("获取代理池请求异常: %s", e)
+        return []
+    except ValueError:
+        log.error("获取代理池响应非 JSON: %s", resp.text[:200])
+        return []
 
 
 def api_add_pool(session: requests.Session, name: str, proxy_url: str) -> bool:
-    """新增代理池，返回是否成功"""
+    """新增代理池，返回是否成功（真实响应: HTTP 201 + {"proxyPool": {...}}）"""
     payload = {
         "name": name,
         "proxyUrl": proxy_url,
@@ -126,10 +143,9 @@ def api_add_pool(session: requests.Session, name: str, proxy_url: str) -> bool:
     }
     try:
         resp = session.post(f"{BASE_URL}/api/proxy-pools", json=payload, timeout=15)
-        data = resp.json()
-        if data.get("success"):
+        if resp.status_code in (200, 201):
             return True
-        log.warning("新增代理池 %s 失败: %s", name, data.get("message", "未知错误"))
+        log.warning("新增代理池 %s 失败: HTTP %s %s", name, resp.status_code, resp.text[:200])
         return False
     except requests.RequestException as e:
         log.error("新增代理池 %s 请求异常: %s", name, e)
@@ -137,14 +153,15 @@ def api_add_pool(session: requests.Session, name: str, proxy_url: str) -> bool:
 
 
 def api_test_pool(session: requests.Session, pool_id) -> bool:
-    """测试代理池连通性，返回是否通过"""
+    """测试代理池连通性，返回是否通过（真实响应: {"ok": bool, "error": str}）"""
     try:
-        resp = session.post(f"{BASE_URL}/api/proxy-pools/{pool_id}/test", timeout=30)
+        resp = session.post(f"{BASE_URL}/api/proxy-pools/{pool_id}/test", timeout=60)
         data = resp.json()
-        # 约定: success=True 表示连通性测试通过
-        return bool(data.get("success"))
+        return bool(data.get("ok"))
     except requests.RequestException as e:
         log.error("测试代理池 %s 请求异常: %s", pool_id, e)
+        return False
+    except ValueError:
         return False
 
 
@@ -274,10 +291,14 @@ def main():
             f.write(p.get("proxyUrl", "") + "\n")
     log.info("最终可用节点 %d 个，已写入 %s", stats["total"], OUTPUT_FILE)
 
-    # 7. 保存 cookie 供 CI 写回 R9_COOKIE
-    cookie_dict = {k: v for k, v in session.cookies.items()}
-    if cookie_dict:
-        save_cookie_jar(cookie_dict)
+    # 7. 保存 cookie 供 CI 写回 R9_COOKIE（保留 domain/path/secure）
+    cookie_list = [
+        {"name": c.name, "value": c.value, "domain": c.domain,
+         "path": c.path, "secure": c.secure}
+        for c in session.cookies
+    ]
+    if cookie_list:
+        save_cookie_jar(cookie_list)
         log.info("cookie 已写入 %s（供 CI 写回 R9_COOKIE）", COOKIE_FILE)
     else:
         log.warning("未获取到 cookie，跳过持久化")
