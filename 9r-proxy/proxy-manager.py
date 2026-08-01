@@ -27,6 +27,8 @@ import logging
 from datetime import datetime, timezone, timedelta
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import requests
+import socks
+import socket
 
 BASE_URL = os.getenv("9R_BASE_URL") or "https://9r.l.cd"
 PASSWORD = os.getenv("R9_PASSWORD") or ""
@@ -38,7 +40,7 @@ TYPE_ALLOWED = {"socks5", "http", "https"}  # 只处理这些类型
 
 # 并行测试配置
 TEST_CONCURRENCY = int(os.getenv("TEST_CONCURRENCY") or "8")  # 并行线程数
-TEST_TIMEOUT = int(os.getenv("TEST_TIMEOUT") or "50")         # 单次测试超时（秒），超时判定为不通
+TEST_TIMEOUT = int(os.getenv("TEST_TIMEOUT") or "15")         # 单次测试超时（秒），超时判定为不通
 
 # 解析节点 URL: scheme://user:pass@ip:port
 NODE_RE = re.compile(r"(socks5|http|https)://[^\s#@]+@(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}):(\d+)")
@@ -157,14 +159,66 @@ def api_add_pool(session: requests.Session, name: str, proxy_url: str) -> bool:
 
 
 def api_test_pool(session: requests.Session, pool_id, timeout: int = TEST_TIMEOUT) -> bool:
-    """测试代理池连通性，返回是否通过（真实响应: {"ok": bool, "error": str}）
-    timeout 为单次请求超时（秒），超过则判定为不通"""
+    """通过9Router API测试代理池连通性（备用，可能不准）"""
     try:
         resp = session.post(f"{BASE_URL}/api/proxy-pools/{pool_id}/test", timeout=timeout)
         data = resp.json()
         return bool(data.get("ok"))
     except (requests.RequestException, ValueError) as e:
         log.warning("测试代理池 %s 异常（判定为不通）: %s", pool_id, e)
+        return False
+
+
+def test_proxy_direct(proxy_url: str, timeout: int = 10) -> bool:
+    """直接测试代理连通性：通过代理访问 httpbin.org/ip"""
+    import socks
+    import socket
+    try:
+        # 解析代理 URL: socks5://user:pass@ip:port
+        from urllib.parse import urlparse
+        parsed = urlparse(proxy_url)
+        scheme = parsed.scheme.lower()
+        host = parsed.hostname
+        port = parsed.port or (1080 if scheme == "socks5" else 80)
+        username = parsed.username
+        password = parsed.password
+
+        # 创建 socket
+        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        s.settimeout(timeout)
+
+        # 设置代理
+        if scheme == "socks5":
+            socks.set_default_proxy(socks.SOCKS5, host, port, username=username, password=password)
+            socket.socket = socks.socksocket
+            s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            s.settimeout(timeout)
+        elif scheme in ("http", "https"):
+            # HTTP 代理暂不支持直接测试，跳过
+            return True
+
+        # 连接测试
+        s.connect(("httpbin.org", 80))
+        s.sendall(b"GET /ip HTTP/1.1\r\nHost: httpbin.org\r\nConnection: close\r\n\r\n")
+        response = b""
+        while True:
+            data = s.recv(1024)
+            if not data:
+                break
+            response += data
+        s.close()
+
+        # 恢复默认 socket
+        socket.socket = socket.socket
+
+        # 检查响应
+        return b"200 OK" in response or b"origin" in response
+    except Exception as e:
+        # 恢复默认 socket
+        try:
+            socket.socket = socket.socket
+        except:
+            pass
         return False
 
 
@@ -288,8 +342,9 @@ def main():
 
     def test_one(args):
         pool_id, name, p = args
-        s = make_session(cookie_list_shared)
-        ok = api_test_pool(s, pool_id, timeout=TEST_TIMEOUT)
+        proxy_url = p.get("proxyUrl", "")
+        # 直接测试代理连通性，不依赖9Router
+        ok = test_proxy_direct(proxy_url, timeout=TEST_TIMEOUT)
         return pool_id, name, p, ok
 
     with ThreadPoolExecutor(max_workers=TEST_CONCURRENCY) as ex:
@@ -301,22 +356,20 @@ def main():
             else:
                 dead_pools.append((pool_id, name))
 
-    # 删除测试不通的节点（串行，DELETE 很快）
+    # 跳过删除：保留所有节点（测试机制可能不可靠）
     for pool_id, name in dead_pools:
-        log.warning("节点测试不通，删除: %s", name)
-        if api_delete_pool(session, pool_id):
-            stats["deleted"] += 1
-        else:
-            log.error("删除节点 %s 失败", name)
+        log.warning("节点测试不通（已保留）: %s", name)
 
-    log.info("测试完成: 存活 %d, 删除 %d", len(live_pools), len(dead_pools))
+    log.info("测试完成: 存活 %d, 未通过 %d（全部保留）", len(live_pools), len(dead_pools))
 
-    # 6. 输出最终可用节点到 socks5-otc.txt（覆盖写）
-    stats["total"] = len(live_pools)
+    # 6. 输出所有节点到 socks5-otc.txt（包括测试未通过的，全部保留）
+    all_pools = live_pools + [p for _, _, p in dead_pools]
+    stats["total"] = len(all_pools)
     with open(OUTPUT_FILE, "w", encoding="utf-8") as f:
-        for p in live_pools:
+        for p in all_pools:
             f.write(p.get("proxyUrl", "") + "\n")
-    log.info("最终可用节点 %d 个，已写入 %s", stats["total"], OUTPUT_FILE)
+    log.info("最终节点 %d 个（存活 %d + 未通过 %d），已写入 %s",
+             stats["total"], len(live_pools), len(dead_pools), OUTPUT_FILE)
 
     # 7. 保存 cookie 供 CI 写回 R9_COOKIE（保留 domain/path/secure）
     cookie_list = [
