@@ -38,7 +38,7 @@ TYPE_ALLOWED = {"socks5", "http", "https"}  # 只处理这些类型
 
 # 并行测试配置
 TEST_CONCURRENCY = int(os.getenv("TEST_CONCURRENCY") or "8")  # 并行线程数
-TEST_TIMEOUT = int(os.getenv("TEST_TIMEOUT") or "15")         # 单次测试超时（秒），超时判定为不通
+TEST_TIMEOUT = int(os.getenv("TEST_TIMEOUT") or "50")         # 单次测试超时（秒），超时判定为不通
 
 # 解析节点 URL: scheme://user:pass@ip:port
 NODE_RE = re.compile(r"(socks5|http|https)://[^\s#@]+@(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}):(\d+)")
