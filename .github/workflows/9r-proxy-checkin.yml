@@ -28,16 +28,7 @@ jobs:
       - name: 📦 安装依赖
         run: pip install -r requirements.txt
 
-      - name: 📡 抓取 TG 节点
-        id: fetch
-        env:
-          TG_API_ID: ${{ secrets.TG_API_ID }}
-          TG_API_HASH: ${{ secrets.TG_API_HASH }}
-          TG_SESSION_STR: ${{ secrets.TG_SESSION_STR }}
-        run: python tg-fetch.py
-
       - name: 🔄 同步 9router 代理池
-        id: sync
         env:
           R9_PASSWORD: ${{ secrets.R9_PASSWORD }}
           R9_COOKIE: ${{ vars.R9_COOKIE }}
@@ -45,38 +36,18 @@ jobs:
           TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
         run: python proxy-manager.py
 
-      - name: 💾 写回 cookie 到 GitHub Variables
-        if: always()
-        env:
-          GH_TOKEN: ${{ secrets.GH_TOKEN }}
-        run: |
-          if [ -f cookies.txt ]; then
-            COOKIE_VALUE=$(cat cookies.txt)
-            echo "写入 cookie 到 R9_COOKIE 变量..."
-            gh variable set R9_COOKIE --body "$COOKIE_VALUE" --repo ${{ github.repository }}
-            echo "✅ 写入成功"
-            rm -f cookies.txt
-          else
-            echo "⏭️ 无 cookies.txt 文件，跳过写入"
-          fi
-
       - name: 📄 提交 socks5-otc.txt
         if: always()
-        working-directory: .   # 覆盖默认，回到仓库根目录
-        env:
-          GH_TOKEN: ${{ secrets.GH_TOKEN }}
+        working-directory: .
         run: |
           if [ -f 9r-proxy/socks5-otc.txt ]; then
             git config user.name "github-actions[bot]"
             git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
             git add 9r-proxy/socks5-otc.txt
             if git diff --cached --quiet; then
-              echo "⏭️ socks5-otc.txt 无变化，跳过提交"
+              echo "⏭️ 无变化，跳过"
             else
-              git commit -m "🔄 chore: 更新 9r-proxy socks5-otc.txt"
+              git commit -m "🔄 更新 socks5-otc.txt"
               git push
-              echo "✅ 已提交并推送 socks5-otc.txt"
             fi
-          else
-            echo "⚠️ socks5-otc.txt 未生成，检查上一步是否失败"
           fi
