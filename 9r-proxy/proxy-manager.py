@@ -20,7 +20,7 @@ import requests
 # 上游 socks5-otc.txt 地址
 UPSTREAM_URL = "https://raw.githubusercontent.com/yutian81/Keepalive/main/9r-proxy/socks5-otc.txt"
 
-BASE_URL = os.getenv("9R_BASE_URL") or "https://9rou.argo.indevs.in"
+BASE_URL = os.getenv("9R_BASE_URL") or "https://9r.l.cd"
 PASSWORD = os.getenv("R9_PASSWORD") or ""
 COOKIE_B64 = os.getenv("R9_COOKIE") or ""
 COOKIE_FILE = "cookies.txt"
